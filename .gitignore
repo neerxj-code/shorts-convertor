@@ -1,0 +1,59 @@
+# Environment & Confidential Files (API keys, secrets)
+.env
+.env.local
+.env.*.local
+backend/.env
+*.env
+!.env.example
+!backend/.env.example
+
+# Python & Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+backend/venv/
+backend/.venv/
+
+# Python Cache & Compiled Files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+
+# SQLite & Databases
+*.db
+*.sqlite
+*.sqlite3
+backend/shortify.db
+
+# Uploaded Media, Output Video Clips & Temp Files
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/outputs/*
+!backend/outputs/.gitkeep
+backend/temp/*
+!backend/temp/.gitkeep
+*.test.wav
+
+# Frontend Build & Dependencies
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Editor & System Files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
