@@ -1,31 +1,32 @@
-# ⚡ Shortify - AI Long-to-Short Video Converter
+# ⚡ Shortify - AI Long-to-Short Video Generator
 
-**Shortify** is a production-grade AI web application that automatically transforms long landscape videos and podcasts into viral 9:16 vertical short clips (YouTube Shorts, Instagram Reels, TikToks).
+**Shortify** is a production-grade AI video generator that automatically transforms long landscape videos and podcasts (20–90+ mins) into viral, high-converting 9:16 vertical short clips (YouTube Shorts, Instagram Reels, TikToks).
 
-It features **100% local speech-to-text recognition** using OpenAI Whisper, word-level animated karaoke captions, Hinglish code-switching preservation, intelligent center-reframing, and an interactive video subtitle editor.
+It features **100% local speech-to-text recognition** using OpenAI Whisper, **AI-powered moment discovery & scoring**, OpenCV face-tracking 9:16 reframing, word-level animated karaoke captions, native Hinglish code-switching preservation, and an interactive video subtitle editor.
 
 ---
 
 ## 🔥 Key Features
 
+- **🧠 AI Short Candidate Discovery & Scoring**:
+  - Automatically analyzes master video transcripts to find high-value moments.
+  - Multi-factor internal scoring (0–100): **Hook Strength**, **Practical Value**, **Emotional Intensity**, **Context Completeness**, **Ending Quality**, and **Silence Penalties**.
+  - Auto-categorizes clips: `Educational`, `Story`, `Insight`, `Advice`, `Opinion`.
+  - Non-maximum suppression deduplication ensures high diversity without overlapping clips.
 - **🎙️ 100% Local Speech AI Processing**:
-  - No external cloud API keys required. Runs completely offline via PyTorch and local Whisper models (`base`, `small`, `medium`, `large-v3`).
-- **🎯 Selectable Accuracy Modes**:
-  - **FAST**: Whisper `base` (~3x speed, low VRAM usage).
-  - **BALANCED**: Whisper `small` (Optimal accuracy & speed balance).
-  - **ACCURATE**: Whisper `large-v3` (Maximum precision for Hinglish & multi-speaker clarity).
+  - Runs completely offline via PyTorch and local Whisper models (`base`, `small`, `medium`, `large-v3`). No external API keys required.
+- **🎯 Smart Target Durations (30s, 45s, 60s, 90s)**:
+  - Finds coherent cut windows near requested duration target without cutting speaker mid-sentence.
+- **📷 Smart 9:16 Reframing & Active Speaker Face Tracking**:
+  - Dynamically centers vertical 9:16 viewport around active speaker faces using OpenCV detection with graceful fallback to center-crop.
 - **🗣️ Native Hinglish & Code-Switching Support**:
-  - Preserves spoken Hinglish (Hindi + English) without unwanted auto-translation.
-- **🔊 `loudnorm` Audio Pre-Processing**:
-  - Automatically normalizes low-volume microphones, speech dynamics, and background noise prior to ASR.
+  - Preserves natural spoken Hinglish (Hindi + English) without unwanted auto-translation.
 - **🛡️ VAD & Hallucination Suppression**:
   - Filters out silent pause hallucinations and phantom subtitle phrases (`no_speech_prob`, `avg_logprob`, and `compression_ratio` thresholding).
-- **🎨 Animated Subtitle Styles**:
+- **🎨 Animated Karaoke & Subtitle Styles**:
   - **Karaoke** (word-by-word centisecond highlight), **Pop**, **Bounce**, **Classic**, **Bold**, and **Minimal**.
-- **✏️ Interactive Subtitle Editor**:
-  - Real-time video preview seeker, word timing editor, segment addition/deletion, and re-rendering on demand.
-- **📱 9:16 Smart Vertical Reframing**:
-  - Automatically center-crops landscape videos into portrait mobile format.
+- **✏️ Interactive Subtitle & Candidate Editor**:
+  - Real-time video preview seeker, candidate selector, word timing editor, and on-demand re-rendering.
 
 ---
 
@@ -36,8 +37,10 @@ It features **100% local speech-to-text recognition** using OpenAI Whisper, word
 | **Frontend** | React 18, Vite, Tailwind CSS, Lucide Icons |
 | **Backend API** | Python 3.10+, FastAPI, Uvicorn, Pydantic |
 | **AI / ASR** | PyTorch, OpenAI Whisper (Local ASR) |
+| **Short Discovery Engine** | Modular `ClipAnalysisProvider` (Rule-based & Heuristic NLP) |
+| **Computer Vision** | OpenCV (Haar Cascade Face Tracking & Speaker Frame Positioning) |
 | **Media Processing** | FFmpeg, FFprobe, imageio-ffmpeg |
-| **Database** | SQLite3 + SQLAlchemy |
+| **Database** | SQLite3 + SQLAlchemy (Auto-migrating Schema) |
 
 ---
 
@@ -47,19 +50,20 @@ It features **100% local speech-to-text recognition** using OpenAI Whisper, word
 shorts-convertor/
 ├── backend/
 │   ├── app/
-│   │   ├── api/routes/       # FastAPI REST endpoints (upload, jobs, captions, render, health)
-│   │   ├── core/             # App configuration, settings & DB engine
+│   │   ├── api/routes/       # FastAPI REST endpoints (upload, jobs, discover, captions, render, health)
+│   │   ├── core/             # App configuration, settings & DB engine with auto-migrations
 │   │   ├── models/           # SQLAlchemy DB models & Pydantic schemas
-│   │   ├── services/         # FFmpeg, Whisper ASR, Clipping, & Subtitle rendering engine
-│   │   ├── utils/            # File management utilities
-│   │   └── main.py           # FastAPI server entry point (lifespan managed)
+│   │   ├── services/         # Whisper ASR, Clip Discovery, Face-Tracking Cropping, ASS Subtitles, FFmpeg Engine
+│   │   ├── utils/            # File management & safe naming utilities
+│   │   ├── workers/          # Background worker job processor
+│   │   └── main.py           # FastAPI server entry point
 │   ├── .env.example          # Environment variables template
 │   └── requirements.txt      # Python dependencies
 ├── src/
-│   ├── components/           # React UI components (Hero, UploadArea, ConfigPanel, ResultsGrid, Editor)
+│   ├── components/           # React UI components (Hero, UploadArea, ConfigPanel, ResultsGrid, VideoCard, Editor)
 │   ├── services/             # API client services
 │   ├── App.jsx               # Main React Application
-│   └── index.css             # Tailwind design tokens
+│   └── index.css             # Design tokens & glassmorphism styling
 ├── package.json
 └── vite.config.js
 ```
@@ -150,7 +154,9 @@ FILE_RETENTION_HOURS=24
 - `GET /api/health` - Health check, GPU status & loaded FFmpeg paths
 - `POST /api/upload` - Upload long video file (supports `.mp4`, `.mov`, `.mkv`, `.avi`)
 - `POST /api/jobs` - Create video conversion job with duration, style & accuracy parameters
-- `GET /api/jobs/{job_id}` - Fetch job progress, status & generated clip metadata
+- `GET /api/jobs/{job_id}` - Fetch job progress, status & candidate clip metadata
+- `POST /api/jobs/{job_id}/discover-clips` - Re-analyze transcript to discover short candidates for a target duration
+- `POST /api/jobs/{job_id}/select-clips` - Update selected short candidates for batch export
 - `PUT /api/captions/{clip_id}` - Save edited subtitle segments
 - `POST /api/render/{clip_id}` - Re-render video clip with updated captions or styles
 - `GET /api/projects` - List all processed video projects
