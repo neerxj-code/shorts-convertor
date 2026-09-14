@@ -45,6 +45,14 @@ class ClipModel(Base):
     end_time = Column(Float, nullable=False)
     duration = Column(Float, nullable=False)
     
+    score = Column(Integer, default=80)
+    score_breakdown_json = Column(Text, nullable=True)
+    category = Column(String, default="Insight")
+    hook = Column(Text, nullable=True)
+    reason = Column(Text, nullable=True)
+    transcript = Column(Text, nullable=True)
+    is_selected = Column(Integer, default=1)  # 1 = selected by default, 0 = rejected
+
     output_path = Column(String, nullable=True)
     output_filename = Column(String, nullable=True)
     thumbnail_path = Column(String, nullable=True)

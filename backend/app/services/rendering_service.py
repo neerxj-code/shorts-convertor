@@ -45,8 +45,16 @@ class RenderingService:
                 video_height=1920
             )
 
-        # 2. Build 9:16 crop filter
-        crop_filter = cropping_service.calculate_crop_filter(in_width, in_height, target_w=1080, target_h=1920)
+        # 2. Build 9:16 crop filter (supporting face-tracking speaker framing)
+        crop_filter = cropping_service.calculate_crop_filter(
+            in_width,
+            in_height,
+            target_w=1080,
+            target_h=1920,
+            video_path=source_video_path,
+            start_time=start_time,
+            end_time=end_time
+        )
 
         # 3. Combine filter chain
         if has_subtitles and os.path.exists(ass_path):

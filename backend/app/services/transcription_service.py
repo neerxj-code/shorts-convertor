@@ -1,7 +1,8 @@
 import os
 import sys
+import abc
 import torch
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from app.core.config import settings
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -16,79 +17,142 @@ def _safe_str(text: str) -> str:
         return str(text)
     return text.encode("ascii", errors="backslashreplace").decode("ascii")
 
-class TranscriptionProvider:
+
+class TranscriptionProvider(abc.ABC):
+    """
+    Abstract Base Class for ASR (Automatic Speech Recognition) Providers.
+    Ensures modularity allowing LocalWhisperProvider or future Cloud ASR providers (e.g. Deepgram, AssemblyAI).
+    """
+
+    @abc.abstractmethod
     def transcribe(
         self,
         audio_path: str,
         language_hint: str = "AUTO",
-        accuracy_mode: str = "BALANCED"
+        accuracy_mode: str = "BALANCED",
+        model_size: Optional[str] = None
     ) -> Dict[str, Any]:
-        raise NotImplementedError
+        """
+        Transcribes audio file and returns standardized transcript result.
+        
+        Must return a dict containing:
+        - language: str (e.g. 'en', 'hi')
+        - text: str (complete transcript text)
+        - segments: List[Dict] with start, end, text, words, confidence metadata
+        - whisper_model_used: str
+        - total_segments: int
+        - total_words: int
+        - suspicious_filtered_count: int
+        """
+        pass
 
-class WhisperProvider(TranscriptionProvider):
-    _models = {}
 
-    def __init__(self, default_model: str = None):
-        self.default_model = default_model or settings.WHISPER_MODEL
+class LocalWhisperProvider(TranscriptionProvider):
+    """
+    Local Whisper ASR Provider supporting models: base, small, medium, large-v3.
+    Recommends 'large-v3' for highest accuracy with automatic fallback.
+    """
+    _models: Dict[str, Any] = {}
+
+    SUPPORTED_MODELS = ["base", "small", "medium", "large-v3"]
+
+    def __init__(self, default_model: Optional[str] = None):
+        self.default_model = default_model or settings.WHISPER_MODEL or "small"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[WhisperProvider] Initialized Whisper Engine (Default: {self.default_model}, Device: {self.device})")
+        print(f"[LocalWhisperProvider] Initialized Engine (Default: {self.default_model}, Device: {self.device})")
 
-    def _select_model_name(self, accuracy_mode: str) -> str:
+    def _select_model_name(self, accuracy_mode: str, requested_model: Optional[str] = None) -> str:
+        if requested_model and requested_model.lower() in self.SUPPORTED_MODELS:
+            return requested_model.lower()
+
         acc = (accuracy_mode or "BALANCED").upper()
-        if acc == "FAST":
+        if acc == "HIGH" or acc == "ACCURATE" or acc == "LARGE":
+            return "large-v3"
+        elif acc == "FAST":
             return "base"
-        elif acc == "ACCURATE":
-            return "large-v3" if torch.cuda.is_available() else "medium"
+        elif acc == "MEDIUM":
+            return "medium"
         else:
-            return settings.WHISPER_MODEL or "small"
+            # BALANCED
+            return "small"
 
     def _get_model(self, model_name: str):
-        if model_name not in WhisperProvider._models:
+        if model_name not in LocalWhisperProvider._models:
             import whisper
-            print(f"[WhisperProvider] Loading Whisper model '{model_name}' on device '{self.device}'...")
-            try:
-                WhisperProvider._models[model_name] = whisper.load_model(model_name, device=self.device)
-            except Exception as e:
-                print(f"[WhisperProvider] Failed to load requested model '{model_name}' ({e}), falling back to 'base'...")
-                if "base" not in WhisperProvider._models:
-                    WhisperProvider._models["base"] = whisper.load_model("base", device=self.device)
-                return WhisperProvider._models["base"]
+            print(f"[LocalWhisperProvider] Loading Whisper model '{model_name}' on device '{self.device}'...")
+            
+            # Fallback cascade sequence if requested model fails to load (e.g. out of memory)
+            fallback_sequence = [model_name]
+            for fb in ["large-v3", "medium", "small", "base"]:
+                if fb not in fallback_sequence:
+                    fallback_sequence.append(fb)
 
-        return WhisperProvider._models[model_name]
+            loaded_model = None
+            loaded_name = model_name
+
+            for candidate in fallback_sequence:
+                try:
+                    print(f"[LocalWhisperProvider] Attempting to load model '{candidate}'...")
+                    loaded_model = whisper.load_model(candidate, device=self.device)
+                    loaded_name = candidate
+                    break
+                except Exception as e:
+                    print(f"[LocalWhisperProvider] Failed to load model '{candidate}': {e}")
+                    if self.device == "cuda":
+                        print("[LocalWhisperProvider] Retrying on CPU fallback...")
+                        try:
+                            loaded_model = whisper.load_model(candidate, device="cpu")
+                            loaded_name = candidate
+                            break
+                        except Exception as e_cpu:
+                            print(f"[LocalWhisperProvider] CPU fallback failed for '{candidate}': {e_cpu}")
+
+            if not loaded_model:
+                raise RuntimeError(f"Failed to load any Whisper model from sequence: {fallback_sequence}")
+
+            LocalWhisperProvider._models[loaded_name] = loaded_model
+            return loaded_name, loaded_model
+
+        return model_name, LocalWhisperProvider._models[model_name]
 
     def transcribe(
         self,
         audio_path: str,
         language_hint: str = "AUTO",
-        accuracy_mode: str = "BALANCED"
+        accuracy_mode: str = "BALANCED",
+        model_size: Optional[str] = None
     ) -> Dict[str, Any]:
-        model_name = self._select_model_name(accuracy_mode)
-        model = self._get_model(model_name)
+        target_model_name = self._select_model_name(accuracy_mode, model_size)
+        actual_model_name, model = self._get_model(target_model_name)
         
         # Prepare options based on language hint
         lang_arg = None
-        if language_hint and language_hint.upper() not in ["AUTO", "HINGLISH"]:
-            if language_hint.upper() == "ENGLISH":
+        lang_upper = (language_hint or "AUTO").upper()
+        
+        if lang_upper not in ["AUTO", "HINGLISH"]:
+            if lang_upper == "ENGLISH":
                 lang_arg = "en"
-            elif language_hint.upper() == "HINDI":
+            elif lang_upper == "HINDI":
                 lang_arg = "hi"
             else:
                 lang_arg = language_hint.lower()
 
         # Hinglish code-switching initial prompt context
-        prompt_text = (
-            "A natural conversation in Hinglish containing a mix of Hindi and English words like: "
-            "aaj, hum, guys, basically, simple, understand, topic, kaafi, consistent, video, shorts, concept."
-            if language_hint and language_hint.upper() in ["HINGLISH", "AUTO"] else None
-        )
+        prompt_text = None
+        if lang_upper in ["HINGLISH", "AUTO"]:
+            prompt_text = (
+                "A natural conversation in Hinglish containing a mix of Hindi and English speech like: "
+                "aaj, hum, guys, basically, simple, understand, topic, kaafi, consistent, video, shorts, concept, "
+                "bohot, important, experience, workflow, output, quality, exact, timestamps, detail."
+            )
 
-        print(f"[WhisperProvider] Transcribing '{audio_path}' (Model: {model_name}, Mode: {accuracy_mode}, Language: {language_hint})...")
+        print(f"[LocalWhisperProvider] Transcribing '{audio_path}' (Requested Model: {target_model_name}, Actual: {actual_model_name}, Mode: {accuracy_mode}, Language Hint: {language_hint})...")
         
         # Base Whisper execution options
         kwargs = {
             "word_timestamps": True,
-            "task": "transcribe",  # Never translate
-            "condition_on_previous_text": False, # Reduce hallucination repetition loops
+            "task": "transcribe",  # DO NOT translate unless explicitly asked
+            "condition_on_previous_text": False,  # Reduce repetitive hallucination loops
             "no_speech_threshold": 0.6,
             "logprob_threshold": -1.0,
             "compression_ratio_threshold": 2.4
@@ -101,7 +165,7 @@ class WhisperProvider(TranscriptionProvider):
         try:
             result = model.transcribe(audio_path, **kwargs)
         except Exception as e:
-            print(f"[WhisperProvider] Warning: word_timestamps / advanced kwargs failed ({e}), retrying basic transcribe...")
+            print(f"[LocalWhisperProvider] Advanced word_timestamps kwargs failed ({e}), falling back to basic transcribe...")
             kwargs_basic = {"task": "transcribe"}
             if lang_arg:
                 kwargs_basic["language"] = lang_arg
@@ -117,7 +181,8 @@ class WhisperProvider(TranscriptionProvider):
         # Known hallucinated phantom phrases during silence
         HALLUCINATED_PHRASES = {
             "thank you for watching", "thanks for watching", "subscribe to my channel",
-            "subtitles by", "amara.org", "like and subscribe", "bye bye", "see you next time"
+            "subtitles by", "amara.org", "like and subscribe", "bye bye", "see you next time",
+            "thank you", "thanks", "subscribe"
         }
 
         for seg in raw_segments:
@@ -131,12 +196,12 @@ class WhisperProvider(TranscriptionProvider):
 
             # VAD & Hallucination Suppression Check
             if no_speech_prob > 0.65 or avg_logprob < -1.2 or comp_ratio > 2.6:
-                print(f"[WhisperProvider] Suppressed suspicious/no-speech segment: '{_safe_str(seg_text)}' (no_speech_prob={no_speech_prob:.2f}, logprob={avg_logprob:.2f})")
+                print(f"[LocalWhisperProvider] Suppressed suspicious/no-speech segment: '{_safe_str(seg_text)}' (no_speech_prob={no_speech_prob:.2f}, logprob={avg_logprob:.2f})")
                 suspicious_filtered_count += 1
                 continue
 
-            if seg_text.lower() in HALLUCINATED_PHRASES:
-                print(f"[WhisperProvider] Suppressed phantom subtitle phrase: '{_safe_str(seg_text)}'")
+            if seg_text.lower().strip(".!?,") in HALLUCINATED_PHRASES:
+                print(f"[LocalWhisperProvider] Suppressed phantom subtitle phrase: '{_safe_str(seg_text)}'")
                 suspicious_filtered_count += 1
                 continue
             
@@ -150,11 +215,13 @@ class WhisperProvider(TranscriptionProvider):
                         continue
                     w_start = float(w.get("start", seg_start))
                     w_end = float(w.get("end", seg_end))
+                    w_conf = float(w.get("probability", 1.0 - no_speech_prob))
                     words_list.append({
                         "word": word_text,
                         "text": word_text,
                         "start": round(w_start, 2),
-                        "end": round(w_end, 2)
+                        "end": round(w_end, 2),
+                        "confidence": round(w_conf, 2)
                     })
                     total_words_count += 1
             
@@ -170,7 +237,8 @@ class WhisperProvider(TranscriptionProvider):
                             "word": tok,
                             "text": tok,
                             "start": round(curr, 2),
-                            "end": round(curr + dur_per_token, 2)
+                            "end": round(curr + dur_per_token, 2),
+                            "confidence": 0.70
                         })
                         curr += dur_per_token
                         total_words_count += 1
@@ -179,19 +247,29 @@ class WhisperProvider(TranscriptionProvider):
                 "start": round(seg_start, 2),
                 "end": round(seg_end, 2),
                 "text": seg_text,
-                "words": words_list
+                "words": words_list,
+                "no_speech_prob": round(no_speech_prob, 3),
+                "avg_logprob": round(avg_logprob, 3),
+                "compression_ratio": round(comp_ratio, 3)
             })
 
         return {
             "language": detected_lang,
             "text": result.get("text", "").strip(),
             "segments": processed_segments,
-            "whisper_model_used": model_name,
+            "whisper_model_used": actual_model_name,
+            "requested_model": target_model_name,
             "accuracy_mode": accuracy_mode,
+            "language_hint": language_hint,
             "total_segments": len(processed_segments),
             "total_words": total_words_count,
             "suspicious_filtered_count": suspicious_filtered_count
         }
 
+
+# Backward compatibility alias
+WhisperProvider = LocalWhisperProvider
+
 # Global instance initialization
-transcription_service = WhisperProvider()
+transcription_service = LocalWhisperProvider()
+

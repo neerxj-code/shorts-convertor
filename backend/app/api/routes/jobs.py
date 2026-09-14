@@ -22,6 +22,13 @@ def build_clip_response(clip: ClipModel, db: Session) -> ClipResponse:
         )
         for c in captions
     ]
+    breakdown = None
+    if getattr(clip, "score_breakdown_json", None):
+        try:
+            breakdown = json.loads(clip.score_breakdown_json)
+        except Exception:
+            pass
+
     return ClipResponse(
         id=clip.id,
         job_id=clip.job_id,
@@ -29,6 +36,13 @@ def build_clip_response(clip: ClipModel, db: Session) -> ClipResponse:
         start_time=clip.start_time,
         end_time=clip.end_time,
         duration=clip.duration,
+        score=getattr(clip, "score", 80),
+        score_breakdown=breakdown,
+        category=getattr(clip, "category", "Insight") or "Insight",
+        hook=getattr(clip, "hook", None),
+        reason=getattr(clip, "reason", None),
+        transcript=getattr(clip, "transcript", None),
+        is_selected=bool(getattr(clip, "is_selected", 1)),
         output_filename=clip.output_filename,
         thumbnail_filename=clip.thumbnail_filename,
         status=clip.status,
@@ -60,34 +74,61 @@ def build_job_response(job: JobModel, db: Session) -> JobResponse:
         clips=clip_schemas
     )
 
+import traceback
+
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
 def create_job(req: CreateJobRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    print("\n==================================================")
+    print(" PROCESSING JOB REQUEST RECEIVED ")
+    print(f" Filename: {req.filename}")
+    print(f" Target Duration: {req.requested_duration}s")
+    print(f" Caption Language: {req.language}")
+    print(f" Caption Style: {req.caption_style}")
+    print(f" Caption Position: {req.caption_position}")
+    print(f" Accuracy Mode: {req.accuracy_mode}")
+    print("==================================================")
+
     file_path = settings.UPLOAD_DIR / req.filename
     if not file_path.exists():
+        print(f"[-] ERROR: Uploaded file '{req.filename}' NOT FOUND at {file_path}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Uploaded file '{req.filename}' not found on server."
+            detail=f"Uploaded file '{req.filename}' not found on server at {file_path}."
         )
 
-    job = JobModel(
-        original_filename=req.filename,
-        file_path=str(file_path),
-        requested_duration=req.requested_duration,
-        language=req.language,
-        caption_style=req.caption_style,
-        caption_position=req.caption_position,
-        accuracy_mode=req.accuracy_mode or "BALANCED",
-        status="UPLOADING",
-        progress=5,
-        stage_message="Job queued for processing..."
-    )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
+    print(f"[+] VIDEO FOUND: {file_path}")
 
-    background_tasks.add_task(process_job, job.id)
+    try:
+        job = JobModel(
+            original_filename=req.filename,
+            file_path=str(file_path),
+            requested_duration=req.requested_duration,
+            language=req.language,
+            caption_style=req.caption_style,
+            caption_position=req.caption_position,
+            accuracy_mode=req.accuracy_mode or "BALANCED",
+            status="UPLOADING",
+            progress=5,
+            stage_message="Job queued for processing..."
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
 
-    return {"job_id": job.id}
+        print(f"[+] JOB CREATED & DATABASE RECORD SAVED (ID: {job.id})")
+
+        background_tasks.add_task(process_job, job.id)
+        print(f"[+] PROCESSING QUEUED & WORKER STARTED for Job ID: {job.id}")
+
+        return {"job_id": job.id}
+
+    except Exception as e:
+        print(f"[-] CRITICAL ERROR CREATING JOB:")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error creating job: {str(e)}"
+        )
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
 def get_job(job_id: str, db: Session = Depends(get_db)):
@@ -131,3 +172,117 @@ def delete_job(job_id: str, db: Session = Depends(get_db)):
     db.delete(job)
     db.commit()
     return {"message": f"Job {job_id} deleted successfully"}
+
+
+from app.services.clip_analysis_service import clip_analysis_service
+from app.services.clipping_service import assign_transcript_to_clip
+from app.models.schemas import DiscoverClipsRequest, SelectClipsRequest
+
+@router.post("/jobs/{job_id}/discover-clips")
+def discover_clips_for_job(
+    job_id: str,
+    req: DiscoverClipsRequest,
+    db: Session = Depends(get_db)
+):
+    job = db.query(JobModel).filter(JobModel.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    if not job.master_transcript_json:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Job transcription not completed yet.")
+
+    try:
+        master_transcript = json.loads(job.master_transcript_json)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Invalid transcript JSON: {e}")
+
+    # Analyze transcript using ClipAnalysisProvider
+    discovered = clip_analysis_service.analyze_transcript(
+        master_transcript=master_transcript,
+        target_duration=req.target_duration,
+        max_clips=req.max_clips
+    )
+
+    if not discovered:
+        # Fallback if no window matched target duration
+        from app.services.clipping_service import FixedDurationClipStrategy
+        fixed_strat = FixedDurationClipStrategy()
+        discovered = fixed_strat.generate_clip_boundaries(job.video_duration, req.target_duration)
+
+    # Delete existing pending clips for this job
+    existing_clips = db.query(ClipModel).filter(ClipModel.job_id == job_id).all()
+    for clip in existing_clips:
+        db.delete(clip)
+    db.commit()
+
+    master_segments = master_transcript.get("segments", [])
+    created_clips = []
+
+    for idx, cand in enumerate(discovered, start=1):
+        c_start = cand["start"]
+        c_end = cand["end"]
+        c_dur = cand["duration"]
+
+        clip_record = ClipModel(
+            job_id=job_id,
+            clip_index=idx,
+            start_time=c_start,
+            end_time=c_end,
+            duration=c_dur,
+            score=cand.get("score", 80),
+            score_breakdown_json=json.dumps(cand.get("score_breakdown", {})),
+            category=cand.get("category", "Insight"),
+            hook=cand.get("hook", ""),
+            reason=cand.get("reason", ""),
+            transcript=cand.get("transcript", ""),
+            is_selected=1,
+            status="PENDING"
+        )
+        db.add(clip_record)
+        db.flush()
+
+        clip_caps = assign_transcript_to_clip(master_segments, c_start, c_end)
+        for cap in clip_caps:
+            cap_record = CaptionModel(
+                clip_id=clip_record.id,
+                start_time=cap["start"],
+                end_time=cap["end"],
+                text=cap["text"],
+                words_json=json.dumps(cap.get("words", []))
+            )
+            db.add(cap_record)
+
+        created_clips.append(clip_record)
+
+    db.commit()
+    
+    return {
+        "job_id": job_id,
+        "total_discovered": len(created_clips),
+        "clips": [build_clip_response(c, db) for c in created_clips]
+    }
+
+
+@router.post("/jobs/{job_id}/select-clips")
+def select_clips_for_job(
+    job_id: str,
+    req: SelectClipsRequest,
+    db: Session = Depends(get_db)
+):
+    job = db.query(JobModel).filter(JobModel.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    clips = db.query(ClipModel).filter(ClipModel.job_id == job_id).all()
+    selected_set = set(req.selected_clip_ids)
+
+    for clip in clips:
+        clip.is_selected = 1 if clip.id in selected_set else 0
+
+    db.commit()
+    return {
+        "job_id": job_id,
+        "selected_count": len(selected_set),
+        "clips": [build_clip_response(c, db) for c in clips]
+    }
+

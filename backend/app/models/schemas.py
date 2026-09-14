@@ -35,6 +35,13 @@ class CreateJobRequest(BaseModel):
     caption_position: str = Field(default="BOTTOM")
     accuracy_mode: Optional[str] = Field(default="BALANCED")
 
+class DiscoverClipsRequest(BaseModel):
+    target_duration: int = Field(default=60, ge=10, le=180)
+    max_clips: int = Field(default=5, ge=1, le=15)
+
+class SelectClipsRequest(BaseModel):
+    selected_clip_ids: List[str]
+
 class ClipResponse(BaseModel):
     id: str
     job_id: str
@@ -42,6 +49,13 @@ class ClipResponse(BaseModel):
     start_time: float
     end_time: float
     duration: float
+    score: Optional[int] = 80
+    score_breakdown: Optional[dict] = None
+    category: Optional[str] = "Insight"
+    hook: Optional[str] = None
+    reason: Optional[str] = None
+    transcript: Optional[str] = None
+    is_selected: Optional[bool] = True
     output_filename: Optional[str] = None
     thumbnail_filename: Optional[str] = None
     status: str

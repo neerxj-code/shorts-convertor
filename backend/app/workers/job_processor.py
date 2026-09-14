@@ -65,28 +65,39 @@ def process_job(job_id: str):
         job.progress = 60
         db.commit()
 
-        # Stage 4: GENERATING CAPTIONS & CLIPS (60-75%)
-        job.status = "GENERATING_CAPTIONS"
+        # Stage 4: DISCOVERING BEST CLIPS & GENERATING CAPTIONS (60-75%)
+        job.status = "DISCOVERING_CLIPS"
         job.progress = 65
-        job.stage_message = "Calculating clip boundaries and word timestamps..."
+        job.stage_message = "Running AI moment discovery, scoring candidates & mapping word alignment..."
         db.commit()
 
-        boundaries = clipping_service.generate_clip_boundaries(
+        candidates = clipping_service.generate_clip_boundaries(
             total_duration=job.video_duration,
-            requested_duration=job.requested_duration
+            requested_duration=job.requested_duration,
+            master_transcript=transcript_result
         )
 
         master_segments = transcript_result.get("segments", [])
         created_clips = []
 
-        for idx, (c_start, c_end) in enumerate(boundaries, start=1):
-            clip_dur = round(c_end - c_start, 2)
+        for idx, cand in enumerate(candidates, start=1):
+            c_start = cand["start"]
+            c_end = cand["end"]
+            c_dur = cand["duration"]
+            
             clip_record = ClipModel(
                 job_id=job_id,
                 clip_index=idx,
                 start_time=c_start,
                 end_time=c_end,
-                duration=clip_dur,
+                duration=c_dur,
+                score=cand.get("score", 80),
+                score_breakdown_json=json.dumps(cand.get("score_breakdown", {})),
+                category=cand.get("category", "Insight"),
+                hook=cand.get("hook", ""),
+                reason=cand.get("reason", ""),
+                transcript=cand.get("transcript", ""),
+                is_selected=1,
                 status="PENDING"
             )
             db.add(clip_record)

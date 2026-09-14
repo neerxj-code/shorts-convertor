@@ -64,18 +64,29 @@ export async function uploadVideoFile(file, onProgress) {
 
 export async function createProcessingJob(jobData) {
   const url = `${API_BASE_URL}/jobs`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(jobData),
-  });
+  console.log(`[createProcessingJob] Sending POST ${url}:`, jobData);
 
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    console.error(`[createProcessingJob] Error ${res.status} at ${url}:`, errData);
-    throw new Error(errData.detail || `Failed to create processing job (HTTP ${res.status})`);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(jobData),
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      console.error(`[createProcessingJob] HTTP ${res.status} error at ${url}:`, errData);
+      const detailStr = typeof errData.detail === 'string' ? errData.detail : JSON.stringify(errData.detail || errData);
+      throw new Error(`HTTP ${res.status}: ${detailStr || res.statusText || 'Processing job creation failed'}`);
+    }
+    return await res.json();
+  } catch (err) {
+    if (err.message && (err.message.startsWith("HTTP") || err.message.includes("not found"))) {
+      throw err;
+    }
+    console.error(`[createProcessingJob] Network failure attempting POST ${url}:`, err);
+    throw new Error(`Backend request could not be reached (${url}): ${err.message || 'Connection refused'}`);
   }
-  return res.json();
 }
 
 export async function getJobStatus(jobId) {
@@ -115,6 +126,26 @@ export async function deleteJobProject(jobId) {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete project (HTTP ${res.status})`);
+  return res.json();
+}
+
+export async function discoverClips(jobId, targetDuration = 60, maxClips = 5) {
+  const res = await fetch(`${API_BASE_URL}/jobs/${jobId}/discover-clips`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target_duration: targetDuration, max_clips: maxClips }),
+  });
+  if (!res.ok) throw new Error(`Failed to discover clips (HTTP ${res.status})`);
+  return res.json();
+}
+
+export async function selectClips(jobId, selectedClipIds) {
+  const res = await fetch(`${API_BASE_URL}/jobs/${jobId}/select-clips`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ selected_clip_ids: selectedClipIds }),
+  });
+  if (!res.ok) throw new Error(`Failed to update selected clips (HTTP ${res.status})`);
   return res.json();
 }
 

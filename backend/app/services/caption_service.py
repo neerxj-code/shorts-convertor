@@ -7,6 +7,54 @@ class CaptionService:
     def __init__(self):
         pass
 
+    def normalize_word_timeline(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Phase 2 Word Alignment:
+        Extracts a clean, normalized, sequential timeline of words across all segments.
+        Each word contains: text, start, end, confidence.
+        """
+        normalized_words = []
+        for seg in segments:
+            seg_start = float(seg.get("start", 0.0))
+            seg_end = float(seg.get("end", 0.0))
+            seg_text = seg.get("text", "").strip()
+            
+            raw_words = seg.get("words", [])
+            if raw_words:
+                for w in raw_words:
+                    word_text = (w.get("word") or w.get("text", "")).strip()
+                    if not word_text:
+                        continue
+                    w_start = float(w.get("start", seg_start))
+                    w_end = float(w.get("end", seg_end))
+                    w_conf = float(w.get("confidence", 0.90))
+                    normalized_words.append({
+                        "text": word_text,
+                        "word": word_text,
+                        "start": round(w_start, 2),
+                        "end": round(w_end, 2),
+                        "confidence": round(w_conf, 2)
+                    })
+            elif seg_text:
+                tokens = seg_text.split()
+                if tokens:
+                    total_dur = max(0.1, seg_end - seg_start)
+                    dur_per_token = total_dur / len(tokens)
+                    curr = seg_start
+                    for tok in tokens:
+                        normalized_words.append({
+                            "text": tok,
+                            "word": tok,
+                            "start": round(curr, 2),
+                            "end": round(curr + dur_per_token, 2),
+                            "confidence": 0.70
+                        })
+                        curr += dur_per_token
+
+        # Ensure sorted by start time
+        normalized_words.sort(key=lambda x: x["start"])
+        return normalized_words
+
     def chunk_captions(self, captions_data: List[Dict[str, Any]], max_words_per_line: int = 4) -> List[Dict[str, Any]]:
         """
         Chunks transcript segments into short, punchy 2-5 word social media caption blocks
@@ -27,7 +75,13 @@ class CaptionService:
                         group = tokens[i:i + max_words_per_line]
                         c_start = curr
                         c_end = min(seg_end, curr + len(group) * dur)
-                        w_list = [{"word": t, "text": t, "start": round(c_start + j*dur, 2), "end": round(c_start + (j+1)*dur, 2)} for j, t in enumerate(group)]
+                        w_list = [{
+                            "word": t,
+                            "text": t,
+                            "start": round(c_start + j*dur, 2),
+                            "end": round(c_start + (j+1)*dur, 2),
+                            "confidence": 0.70
+                        } for j, t in enumerate(group)]
                         chunked.append({
                             "start": round(c_start, 2),
                             "end": round(c_end, 2),

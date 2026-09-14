@@ -203,6 +203,7 @@ export default function App() {
                     setCurrentJob(refreshed);
                   }}
                   onReset={handleReset}
+                  onUpdateJob={setCurrentJob}
                 />
               </div>
             )}

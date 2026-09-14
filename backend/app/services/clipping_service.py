@@ -1,33 +1,94 @@
-from typing import List, Tuple, Dict, Any
+import re
+from typing import List, Tuple, Dict, Any, Optional
 
 class ClipStrategy:
-    def generate_clip_boundaries(self, total_duration: float, requested_duration: int) -> List[Tuple[float, float]]:
+    def generate_clip_boundaries(
+        self,
+        total_duration: float,
+        requested_duration: int,
+        master_transcript: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
 class FixedDurationClipStrategy(ClipStrategy):
-    def generate_clip_boundaries(self, total_duration: float, requested_duration: int) -> List[Tuple[float, float]]:
-        boundaries = []
+    def generate_clip_boundaries(
+        self,
+        total_duration: float,
+        requested_duration: int,
+        master_transcript: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        candidates = []
         if total_duration <= 0:
-            return boundaries
+            return candidates
         
-        # If video is shorter than or equal to requested duration
-        if total_duration <= requested_duration + 2.0:  # small grace margin
-            return [(0.0, round(total_duration, 2))]
+        if total_duration <= requested_duration + 2.0:
+            return [{
+                "start": 0.0,
+                "end": round(total_duration, 2),
+                "duration": round(total_duration, 2),
+                "score": 75,
+                "hook": "Full Video Clip",
+                "reason": "Video is shorter than requested duration target.",
+                "transcript": ""
+            }]
         
         curr_start = 0.0
         step = float(requested_duration)
         
         while curr_start < total_duration:
             curr_end = min(curr_start + step, total_duration)
-            
-            # Skip trailing tiny fragment under 5 seconds unless it's the only clip
-            if (curr_end - curr_start) < 5.0 and len(boundaries) > 0:
+            if (curr_end - curr_start) < 5.0 and len(candidates) > 0:
                 break
                 
-            boundaries.append((round(curr_start, 2), round(curr_end, 2)))
+            dur = round(curr_end - curr_start, 2)
+            candidates.append({
+                "start": round(curr_start, 2),
+                "end": round(curr_end, 2),
+                "duration": dur,
+                "score": 70,
+                "hook": f"Clip starting at {round(curr_start, 1)}s",
+                "reason": "Fixed duration window cut",
+                "transcript": ""
+            })
             curr_start += step
             
-        return boundaries
+        return candidates
+
+
+from app.services.clip_analysis_service import clip_analysis_service
+
+class AIClipDiscoveryStrategy(ClipStrategy):
+    """
+    Phase 4, Phase 5 & Phase 6: AI-driven short discovery engine.
+    Analyzes master transcript to find high-scoring moments near requested target duration
+    with smart sentence boundaries, hook detection, and speech density checks.
+    """
+
+    def generate_clip_boundaries(
+        self,
+        total_duration: float,
+        requested_duration: int,
+        master_transcript: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        if total_duration <= 0:
+            return []
+
+        if not master_transcript or not master_transcript.get("segments"):
+            fixed_strat = FixedDurationClipStrategy()
+            return fixed_strat.generate_clip_boundaries(total_duration, requested_duration)
+
+        # Delegate to modular clip analysis service
+        candidates = clip_analysis_service.analyze_transcript(
+            master_transcript=master_transcript,
+            target_duration=requested_duration,
+            max_clips=8
+        )
+
+        if not candidates:
+            fixed_strat = FixedDurationClipStrategy()
+            return fixed_strat.generate_clip_boundaries(total_duration, requested_duration)
+
+        return candidates
 
 
 def assign_transcript_to_clip(
@@ -57,6 +118,7 @@ def assign_transcript_to_clip(
         for w in seg.get("words", []):
             w_start = float(w.get("start", seg_start))
             w_end = float(w.get("end", seg_end))
+            w_conf = float(w.get("confidence", 0.90))
             
             if w_end <= clip_start or w_start >= clip_end:
                 continue
@@ -65,7 +127,8 @@ def assign_transcript_to_clip(
                 "word": w.get("word", ""),
                 "text": w.get("text", w.get("word", "")),
                 "start": round(max(0.0, w_start - clip_start), 2),
-                "end": round(min(clip_end - clip_start, w_end - clip_start), 2)
+                "end": round(min(clip_end - clip_start, w_end - clip_start), 2),
+                "confidence": round(w_conf, 2)
             })
             
         if rel_words or seg.get("text", "").strip():
@@ -78,4 +141,5 @@ def assign_transcript_to_clip(
             
     return clip_captions
 
-clipping_service = FixedDurationClipStrategy()
+clipping_service = AIClipDiscoveryStrategy()
+
