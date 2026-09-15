@@ -53,7 +53,10 @@ def process_job(job_id: str):
         # Stage 3: TRANSCRIBING (35-60%)
         job.status = "TRANSCRIBING"
         job.progress = 40
-        job.stage_message = "Running Whisper speech-to-text (English/Hindi/Hinglish)..."
+        
+        acc_str = (job.accuracy_mode or "BALANCED").upper()
+        target_model_label = "Large-v3" if acc_str in ["ACCURATE", "HIGH", "LARGE"] else ("Small" if acc_str == "BALANCED" else "Base")
+        job.stage_message = f"Transcribing with Whisper {target_model_label} ({job.language or 'Hinglish'})..."
         db.commit()
 
         transcript_result = transcription_service.transcribe(
@@ -62,6 +65,8 @@ def process_job(job_id: str):
             accuracy_mode=job.accuracy_mode
         )
         job.master_transcript_json = json.dumps(transcript_result)
+        actual_model_used = transcript_result.get("whisper_model_used", target_model_label)
+        job.stage_message = f"Transcription complete via Whisper {actual_model_used.capitalize()} ({transcript_result.get('total_words', 0)} words detected)"
         job.progress = 60
         db.commit()
 

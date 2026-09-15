@@ -66,7 +66,7 @@ class LocalWhisperProvider(TranscriptionProvider):
             return requested_model.lower()
 
         acc = (accuracy_mode or "BALANCED").upper()
-        if acc == "HIGH" or acc == "ACCURATE" or acc == "LARGE":
+        if acc in ["ACCURATE", "HIGH", "LARGE"]:
             return "large-v3"
         elif acc == "FAST":
             return "base"
@@ -81,7 +81,6 @@ class LocalWhisperProvider(TranscriptionProvider):
             import whisper
             print(f"[LocalWhisperProvider] Loading Whisper model '{model_name}' on device '{self.device}'...")
             
-            # Fallback cascade sequence if requested model fails to load (e.g. out of memory)
             fallback_sequence = [model_name]
             for fb in ["large-v3", "medium", "small", "base"]:
                 if fb not in fallback_sequence:
@@ -89,26 +88,43 @@ class LocalWhisperProvider(TranscriptionProvider):
 
             loaded_model = None
             loaded_name = model_name
+            failure_reasons = {}
 
             for candidate in fallback_sequence:
                 try:
-                    print(f"[LocalWhisperProvider] Attempting to load model '{candidate}'...")
+                    print(f"[LocalWhisperProvider] Attempting to load Whisper model '{candidate}' on {self.device}...")
                     loaded_model = whisper.load_model(candidate, device=self.device)
                     loaded_name = candidate
                     break
                 except Exception as e:
-                    print(f"[LocalWhisperProvider] Failed to load model '{candidate}': {e}")
+                    reason_msg = f"Failed on {self.device}: {str(e)}"
+                    print(f"[LocalWhisperProvider] Warning: {reason_msg}")
+                    failure_reasons[candidate] = reason_msg
+                    
                     if self.device == "cuda":
-                        print("[LocalWhisperProvider] Retrying on CPU fallback...")
                         try:
+                            print(f"[LocalWhisperProvider] Retrying '{candidate}' on CPU fallback...")
                             loaded_model = whisper.load_model(candidate, device="cpu")
                             loaded_name = candidate
                             break
                         except Exception as e_cpu:
-                            print(f"[LocalWhisperProvider] CPU fallback failed for '{candidate}': {e_cpu}")
+                            reason_cpu = f"Failed on CPU: {str(e_cpu)}"
+                            print(f"[LocalWhisperProvider] Warning: {reason_cpu}")
+                            failure_reasons[f"{candidate}_cpu"] = reason_cpu
 
             if not loaded_model:
-                raise RuntimeError(f"Failed to load any Whisper model from sequence: {fallback_sequence}")
+                raise RuntimeError(
+                    f"Failed to load Whisper model '{model_name}'. Diagnostic log:\n"
+                    + "\n".join(f" - {k}: {v}" for k, v in failure_reasons.items())
+                )
+
+            if loaded_name != model_name:
+                print(
+                    f"\n[LocalWhisperProvider] FALLBACK NOTICE:\n"
+                    f"  REQUESTED MODEL: {model_name}\n"
+                    f"  ACTUAL MODEL   : {loaded_name}\n"
+                    f"  REASON         : Requested model '{model_name}' failed to load ({failure_reasons.get(model_name, 'Resource constraints')})\n"
+                )
 
             LocalWhisperProvider._models[loaded_name] = loaded_model
             return loaded_name, loaded_model
@@ -125,6 +141,12 @@ class LocalWhisperProvider(TranscriptionProvider):
         target_model_name = self._select_model_name(accuracy_mode, model_size)
         actual_model_name, model = self._get_model(target_model_name)
         
+        # Log exact requested vs actual model
+        print(f"\n[LocalWhisperProvider] Accuracy Mode: {accuracy_mode.upper()}")
+        print(f"[LocalWhisperProvider] Requested Model: {target_model_name}")
+        print(f"[LocalWhisperProvider] Actual Loaded Model: {actual_model_name}")
+        print(f"[LocalWhisperProvider] Speech Language Mode: {language_hint.upper()}\n")
+
         # Prepare options based on language hint
         lang_arg = None
         lang_upper = (language_hint or "AUTO").upper()
@@ -141,18 +163,18 @@ class LocalWhisperProvider(TranscriptionProvider):
         prompt_text = None
         if lang_upper in ["HINGLISH", "AUTO"]:
             prompt_text = (
-                "A natural conversation in Hinglish containing a mix of Hindi and English speech like: "
-                "aaj, hum, guys, basically, simple, understand, topic, kaafi, consistent, video, shorts, concept, "
-                "bohot, important, experience, workflow, output, quality, exact, timestamps, detail."
+                "Yeh ek natural Hinglish conversation hai featuring mixed Hindi and English speech like: "
+                "guys, video, topic, aaj, hum, simple, basically, important, consistency, bohot, acha, "
+                "experience, workflow, output, quality, concept, strategy, results."
             )
 
-        print(f"[LocalWhisperProvider] Transcribing '{audio_path}' (Requested Model: {target_model_name}, Actual: {actual_model_name}, Mode: {accuracy_mode}, Language Hint: {language_hint})...")
+        print(f"[LocalWhisperProvider] Transcribing audio '{audio_path}'...")
         
-        # Base Whisper execution options
+        # Base Whisper execution options - ALWAYS enforce task='transcribe' (NEVER translate)
         kwargs = {
             "word_timestamps": True,
-            "task": "transcribe",  # DO NOT translate unless explicitly asked
-            "condition_on_previous_text": False,  # Reduce repetitive hallucination loops
+            "task": "transcribe",
+            "condition_on_previous_text": False,  # Prevents hallucination loops during pauses
             "no_speech_threshold": 0.6,
             "logprob_threshold": -1.0,
             "compression_ratio_threshold": 2.4
